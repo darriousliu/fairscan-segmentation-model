@@ -39,7 +39,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from albumentations.pytorch import ToTensorV2
-from torch.ao.quantization import QConfigMapping, get_default_qconfig
+from torch.ao.quantization import QConfig, QConfigMapping
+from torch.ao.quantization.observer import (
+    HistogramObserver,
+    PerChannelMinMaxObserver,
+)
 from torch.ao.quantization.quantize_fx import convert_fx, prepare_fx
 from torch.utils.mobile_optimizer import optimize_for_mobile
 
@@ -85,7 +89,18 @@ def load_fp32_model() -> nn.Module:
 
 
 def build_qconfig_mapping() -> QConfigMapping:
-    qconfig = get_default_qconfig("qnnpack")
+    # Per-channel weight quantization is essential for MobileNetV2: depthwise
+    # conv channels have wildly different weight magnitudes, and per-tensor
+    # quant (QNNPACK's default) rounds small channels to zero -> large Dice
+    # drop. QNNPACK runtime supports per-channel Conv2d weights in recent
+    # PyTorch versions.
+    qconfig = QConfig(
+        activation=HistogramObserver.with_args(reduce_range=False),
+        weight=PerChannelMinMaxObserver.with_args(
+            dtype=torch.qint8,
+            qscheme=torch.per_channel_symmetric,
+        ),
+    )
     # Bilinear upsample on QNNPACK is unstable. Leave every upsample op in
     # fp32; FX inserts DeQuant/Quant around the fp32 island automatically.
     return (
