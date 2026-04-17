@@ -101,11 +101,18 @@ def build_qconfig_mapping() -> QConfigMapping:
             qscheme=torch.per_channel_symmetric,
         ),
     )
-    # Bilinear upsample on QNNPACK is unstable. Leave every upsample op in
-    # fp32; FX inserts DeQuant/Quant around the fp32 island automatically.
+    # Quantize encoder body only. Decoder (ASPP + concat + projection) has
+    # activations whose ranges span several orders of magnitude between
+    # branches; calibrating them with per-tensor activation observers
+    # collapses the int8 output to a near-constant value. Keeping decoder +
+    # segmentation_head in fp32 costs ~1 MB but restores accuracy.
+    #
+    # Bilinear upsample on QNNPACK is also unstable, so every upsample op
+    # is left in fp32 as well.
     return (
         QConfigMapping()
-        .set_global(qconfig)
+        .set_global(None)
+        .set_module_name("encoder", qconfig)
         .set_object_type(F.interpolate, None)
         .set_object_type(nn.Upsample, None)
         .set_object_type(nn.UpsamplingBilinear2d, None)
@@ -184,7 +191,18 @@ def main():
         print(f"  fp32 Dice: {np.mean(fp32_scores):.4f}")
         print(f"  int8 Dice: {np.mean(int8_scores):.4f}")
         if np.mean(int8_scores) < 0.5 * np.mean(fp32_scores):
-            print("  WARNING: int8 Dice dropped >50%. Re-check preprocessing.")
+            print("  WARNING: int8 Dice dropped >50%.")
+
+    print("Diagnostic: int8 output variability across 3 different images")
+    sample_paths = sorted(glob.glob(os.path.join(VAL_IMAGE_DIR, "*.jpg")))[:3]
+    with torch.no_grad():
+        for p in sample_paths:
+            img = cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB)
+            aug = transform(image=img, mask=np.zeros(img.shape[:2], dtype=np.float32))
+            out = quantized(aug["image"].unsqueeze(0))
+            print(f"  {os.path.basename(p)}: "
+                  f"mean={out.mean().item():.3f} std={out.std().item():.3f} "
+                  f"min={out.min().item():.3f} max={out.max().item():.3f}")
 
     print("Tracing + optimize_for_mobile + save for lite interpreter...")
     traced = torch.jit.trace(quantized, example_input[0])
