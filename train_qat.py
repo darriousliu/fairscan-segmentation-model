@@ -71,6 +71,10 @@ FREEZE_BN_AFTER_EPOCH = 1  # BN running stats frozen from epoch 2 onward
 FREEZE_OBSERVER_AFTER_EPOCH = 1  # activation observers frozen from epoch 2 onward
 
 torch.backends.quantized.engine = "qnnpack"
+# Use all available cores for intra-op parallelism. QAT on Apple Silicon CPU
+# benefits a lot from this: MobileNetV2's depthwise convs are memory-bound and
+# scale well across performance cores.
+torch.set_num_threads(max(1, os.cpu_count() or 1))
 
 
 class DocumentSegmentationDataset(Dataset):
@@ -164,8 +168,12 @@ def evaluate_dice(model, loader, device):
 
 
 def main():
+    # MPS is intentionally not used: FakeQuantize / HistogramObserver /
+    # per-channel observers have no MPS kernels, so QAT on MPS either errors
+    # out or silently falls back to CPU with extra transfers. QNNPACK's
+    # convert_fx path is CPU-only anyway.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    print(f"Device: {device} (torch threads: {torch.get_num_threads()})")
 
     print("Loading fp32 checkpoint...")
     base = smp.DeepLabV3Plus(
