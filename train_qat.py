@@ -63,11 +63,12 @@ VAL_MASK_DIR = os.path.join(DATASET_DIR, "val/masks")
 
 ENCODER = "mobilenet_v2"
 INPUT_SIZE = 256
-QAT_EPOCHS = 5
-QAT_BATCH_SIZE = 4
+QAT_EPOCHS = 3
+QAT_BATCH_SIZE = 16
+QAT_NUM_WORKERS = 4
 QAT_LR = 1e-5  # fine-tune LR, 20x smaller than the 1e-4 used in train.py
-FREEZE_BN_AFTER_EPOCH = 2  # BN running stats frozen from epoch 3 onward
-FREEZE_OBSERVER_AFTER_EPOCH = 3  # activation observers frozen from epoch 4 onward
+FREEZE_BN_AFTER_EPOCH = 1  # BN running stats frozen from epoch 2 onward
+FREEZE_OBSERVER_AFTER_EPOCH = 1  # activation observers frozen from epoch 2 onward
 
 torch.backends.quantized.engine = "qnnpack"
 
@@ -186,13 +187,16 @@ def main():
         A.RandomBrightnessContrast(p=0.2),
         shared_transform,
     ])
+    pin = device.type == "cuda"
     train_loader = DataLoader(
         DocumentSegmentationDataset(TRAIN_IMAGE_DIR, TRAIN_MASK_DIR, train_transform),
         batch_size=QAT_BATCH_SIZE, shuffle=True, drop_last=True,
+        num_workers=QAT_NUM_WORKERS, pin_memory=pin, persistent_workers=QAT_NUM_WORKERS > 0,
     )
     val_loader = DataLoader(
         DocumentSegmentationDataset(VAL_IMAGE_DIR, VAL_MASK_DIR, shared_transform),
         batch_size=QAT_BATCH_SIZE, shuffle=False,
+        num_workers=QAT_NUM_WORKERS, pin_memory=pin, persistent_workers=QAT_NUM_WORKERS > 0,
     )
 
     # prepare_qat_fx handles Conv-BN(-ReLU) fusion into QAT-aware modules
@@ -221,7 +225,8 @@ def main():
 
         total_loss = 0.0
         for images, masks in train_loader:
-            images, masks = images.to(device), masks.to(device)
+            images = images.to(device, non_blocking=True)
+            masks = masks.to(device, non_blocking=True)
             logits = prepared(images)
             loss = loss_fn(logits, masks)
             optimizer.zero_grad()
@@ -230,11 +235,15 @@ def main():
             total_loss += loss.item()
         train_avg = total_loss / len(train_loader)
 
-        # Evaluate the fake-quantized model (still fp32 execution, but with
-        # FakeQuantize round-clamp simulating int8 noise).
-        fakeq_dice = evaluate_dice(prepared, val_loader, device)
-        print(f"[QAT {epoch + 1}/{QAT_EPOCHS}] train_loss={train_avg:.4f} "
-              f"fakeq_dice={fakeq_dice:.4f}", flush=True)
+        # Skip FakeQuantize eval on intermediate epochs -- eval is as slow as
+        # one extra training pass because FakeQuantize runs on forward too.
+        if epoch == QAT_EPOCHS - 1:
+            fakeq_dice = evaluate_dice(prepared, val_loader, device)
+            print(f"[QAT {epoch + 1}/{QAT_EPOCHS}] train_loss={train_avg:.4f} "
+                  f"fakeq_dice={fakeq_dice:.4f}", flush=True)
+        else:
+            print(f"[QAT {epoch + 1}/{QAT_EPOCHS}] train_loss={train_avg:.4f}",
+                  flush=True)
 
     print("Converting QAT model to real int8...")
     prepared.eval().cpu()
