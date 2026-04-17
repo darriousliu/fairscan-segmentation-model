@@ -63,12 +63,12 @@ VAL_MASK_DIR = os.path.join(DATASET_DIR, "val/masks")
 
 ENCODER = "mobilenet_v2"
 INPUT_SIZE = 256
-QAT_EPOCHS = 3
+QAT_EPOCHS = 8
 QAT_BATCH_SIZE = 16
 QAT_NUM_WORKERS = 4
-QAT_LR = 1e-5  # fine-tune LR, 20x smaller than the 1e-4 used in train.py
-FREEZE_BN_AFTER_EPOCH = 1  # BN running stats frozen from epoch 2 onward
-FREEZE_OBSERVER_AFTER_EPOCH = 1  # activation observers frozen from epoch 2 onward
+QAT_LR = 5e-5  # fine-tune LR, 2x smaller than train.py's 1e-4
+FREEZE_BN_AFTER_EPOCH = 4  # BN running stats frozen from epoch 5 onward
+FREEZE_OBSERVER_AFTER_EPOCH = 5  # activation observers frozen from epoch 6 onward
 
 torch.backends.quantized.engine = "qnnpack"
 # Use all available cores for intra-op parallelism. QAT on Apple Silicon CPU
@@ -137,7 +137,11 @@ def build_qat_qconfig_mapping() -> QConfigMapping:
         QConfigMapping()
         .set_global(None)
         .set_module_name("encoder", qat_qconfig)
+        # Stem: raw ImageNet-normalized pixels, out-of-distribution for int8.
         .set_module_name("encoder.features.0", None)
+        # Final 320->1280 projection: high channel count + pre-global-pool
+        # distribution is the other classic MobileNetV2 quant failure point.
+        .set_module_name("encoder.features.18", None)
         .set_object_type(F.interpolate, None)
         .set_object_type(nn.Upsample, None)
         .set_object_type(nn.UpsamplingBilinear2d, None)
@@ -243,9 +247,8 @@ def main():
             total_loss += loss.item()
         train_avg = total_loss / len(train_loader)
 
-        # Skip FakeQuantize eval on intermediate epochs -- eval is as slow as
-        # one extra training pass because FakeQuantize runs on forward too.
-        if epoch == QAT_EPOCHS - 1:
+        # Eval every other epoch to track convergence without doubling runtime.
+        if epoch % 2 == 1 or epoch == QAT_EPOCHS - 1:
             fakeq_dice = evaluate_dice(prepared, val_loader, device)
             print(f"[QAT {epoch + 1}/{QAT_EPOCHS}] train_loss={train_avg:.4f} "
                   f"fakeq_dice={fakeq_dice:.4f}", flush=True)
