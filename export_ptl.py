@@ -73,7 +73,7 @@ class TraceFriendlyDeepLabV3Plus(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         features = self.encoder(x)
-        decoder_output = self.decoder(*features)
+        decoder_output = self.decoder(features)
         return self.segmentation_head(decoder_output)
 
 

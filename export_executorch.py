@@ -47,7 +47,7 @@ import segmentation_models_pytorch as smp
 import torch
 import torch.nn as nn
 from albumentations.pytorch import ToTensorV2
-from torch.ao.quantization.quantize_pt2e import convert_pt2e, prepare_pt2e
+from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
 
 from executorch.backends.xnnpack.partition.xnnpack_partitioner import (
     XnnpackPartitioner,
@@ -81,7 +81,7 @@ class TraceFriendlyDeepLabV3Plus(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         features = self.encoder(x)
-        decoder_output = self.decoder(*features)
+        decoder_output = self.decoder(features)
         return self.segmentation_head(decoder_output)
 
 
@@ -150,7 +150,7 @@ def main():
     example_input = (torch.randn(1, 3, INPUT_SIZE, INPUT_SIZE),)
 
     print("Exporting via torch.export.export_for_training (PT2E entry point)...")
-    exported_for_quant = torch.export.export_for_training(
+    exported_for_quant = torch.export.export(
         fp32_model, example_input
     ).module()
 

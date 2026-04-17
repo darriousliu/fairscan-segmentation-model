@@ -1,6 +1,7 @@
-litert-torch==0.8.0
-torchvision==0.24.1
+torchvision==0.26.0
 segmentation-models-pytorch==0.5.0
 albumentations==2.0.8
 opencv-python==4.13.0.92
 numpy==2.4.2
+torch==2.11.0
+executorch==1.2.0
