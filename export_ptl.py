@@ -44,7 +44,8 @@ from torch.ao.quantization.observer import (
     HistogramObserver,
     PerChannelMinMaxObserver,
 )
-from torch.ao.quantization.quantize_fx import convert_fx, prepare_fx
+from torch.ao.quantization.backend_config import get_qnnpack_backend_config
+from torch.ao.quantization.quantize_fx import convert_fx, fuse_fx, prepare_fx
 from torch.utils.mobile_optimizer import optimize_for_mobile
 
 BUILD_DIR = "build"
@@ -113,6 +114,10 @@ def build_qconfig_mapping() -> QConfigMapping:
         QConfigMapping()
         .set_global(None)
         .set_module_name("encoder", qconfig)
+        # Stem conv sees raw ImageNet-normalized pixels (~[-2.1, 2.6]) whose
+        # distribution is unlike any downstream ReLU6 activation; leaving it
+        # fp32 avoids wasting int8 range on input outliers.
+        .set_module_name("encoder.features.0", None)
         .set_object_type(F.interpolate, None)
         .set_object_type(nn.Upsample, None)
         .set_object_type(nn.UpsamplingBilinear2d, None)
@@ -172,7 +177,19 @@ def main():
 
     print("Preparing FX graph-mode quantization (QNNPACK, upsample left fp32)...")
     example_input = (torch.randn(1, 3, INPUT_SIZE, INPUT_SIZE),)
-    prepared = prepare_fx(fp32_model, build_qconfig_mapping(), example_input)
+    backend_config = get_qnnpack_backend_config()
+    # Explicit Conv-BN(-ReLU) fusion. prepare_fx auto-fuses, but for
+    # torchvision's Conv2dNormActivation blocks the pattern match can
+    # silently miss, leaving BN as a separate op whose running stats get
+    # mangled by int8 scales and produce the "encoder output drift" we
+    # observed.
+    fused = fuse_fx(fp32_model, backend_config=backend_config)
+    prepared = prepare_fx(
+        fused,
+        build_qconfig_mapping(),
+        example_input,
+        backend_config=backend_config,
+    )
 
     transform = calibration_transform()
     print(f"Calibrating on up to {CALIBRATION_IMAGES} validation images...")
@@ -183,7 +200,7 @@ def main():
                 print(f"  {i + 1} images")
 
     print("Converting to int8...")
-    quantized = convert_fx(prepared).eval()
+    quantized = convert_fx(prepared, backend_config=backend_config).eval()
 
     print("Sanity-check: fp32 vs int8 Dice on validation split")
     fp32_scores, int8_scores = compare_dice(fp32_model, quantized, transform)
